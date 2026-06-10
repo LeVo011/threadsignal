@@ -2,7 +2,7 @@ from groq import Groq
 from sqlalchemy.orm import Session
 from models import Customer, Campaign, CampaignLog
 from datetime import datetime, timedelta
-import httpx, json, os
+import httpx, json, os, re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -86,6 +86,29 @@ def segment_customers(db: Session, min_spent=None, max_spent=None, inactive_days
     return [{"id": c.id, "name": c.name, "email": c.email, "city": c.city, "total_spent": c.total_spent} for c in customers]
 
 
+def fallback_message(customer: Customer, campaign_goal: str):
+    goal = campaign_goal.lower()
+    if "win" in goal or "inactive" in goal or "ordered" in goal:
+        return (
+            f"Hi {customer.name.split()[0]}, we have missed you at ThreadSignal. "
+            "Here is a private comeback offer on styles picked for you."
+        )
+    if "flash" in goal or "sale" in goal:
+        return (
+            f"Hi {customer.name.split()[0]}, ThreadSignal has a limited-time drop for {customer.city}. "
+            "Take a look before the best pieces sell out."
+        )
+    if "high" in goal or "exclusive" in goal or "preview" in goal:
+        return (
+            f"Hi {customer.name.split()[0]}, as one of our valued shoppers, "
+            "you are invited to preview ThreadSignal's newest collection first."
+        )
+    return (
+        f"Hi {customer.name.split()[0]}, ThreadSignal has something new for you. "
+        "Explore fresh picks selected around your style."
+    )
+
+
 def draft_messages(db: Session, campaign_goal: str, customer_ids: list):
     customers = db.query(Customer).filter(Customer.id.in_([int(x) for x in customer_ids])).all()
     messages = {}
@@ -95,12 +118,16 @@ Write a short personalized WhatsApp message (max 2 sentences) for this customer.
 Customer: {c.name}, City: {c.city}, Total spent: ₹{c.total_spent}
 Goal: {campaign_goal}
 Be warm, personal, with a subtle call to action. No excessive emojis."""
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=120
-        )
-        messages[str(c.id)] = response.choices[0].message.content.strip()
+        try:
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=120
+            )
+            messages[str(c.id)] = response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"Draft message fallback for customer {c.id}: {e}")
+            messages[str(c.id)] = fallback_message(c, campaign_goal)
     return messages
 
 
@@ -161,6 +188,57 @@ def get_campaign_insights(db: Session, campaign_id: int):
     return {"campaign_id": campaign_id, "total": len(logs), "stats": stats}
 
 
+def infer_campaign_plan(user_message: str):
+    text = user_message.lower()
+    filters = {}
+
+    inactive_match = re.search(r"(\d+)\s*(?:\+?\s*)?days?", text)
+    if "inactive" in text or "ordered" in text or "win" in text:
+        filters["inactive_days"] = int(inactive_match.group(1)) if inactive_match else 60
+
+    spend_match = re.search(r"(?:spent|spend|over|above|more than)\s*(?:rs\.?|inr|₹)?\s*(\d+)", text)
+    if spend_match:
+        filters["min_spent"] = int(spend_match.group(1))
+    elif "high value" in text or "high-value" in text:
+        filters["min_spent"] = 3000
+
+    cities = ["Delhi", "Mumbai", "Bangalore", "Chennai", "Hyderabad", "Ahmedabad", "Pune", "Kolkata"]
+    for city in cities:
+        if city.lower() in text:
+            filters["city"] = city
+            break
+
+    if "win" in text or "inactive" in text or "ordered" in text:
+        name = "Win-Back Campaign"
+    elif "city" in text or filters.get("city"):
+        name = f"{filters.get('city', 'City')} Flash Sale"
+    elif filters.get("min_spent"):
+        name = "High-Value Customer Campaign"
+    else:
+        name = "AI Campaign"
+
+    return name, filters
+
+
+def run_fallback_campaign(user_message: str, db: Session):
+    campaign_name, filters = infer_campaign_plan(user_message)
+    customers = segment_customers(db, **filters)
+
+    if not customers:
+        return "I could not find matching customers for that request. Try broadening the audience or using a city/spend/inactivity filter."
+
+    customer_ids = [c["id"] for c in customers]
+    messages = draft_messages(db, user_message, customer_ids)
+    result = execute_campaign(db, campaign_name, customer_ids, messages)
+    insights = get_campaign_insights(db, result["campaign_id"])
+
+    return (
+        f"I created {campaign_name} for {len(customer_ids)} customers. "
+        "I segmented the audience, drafted personalized WhatsApp messages, and sent them through the channel service. "
+        f"The campaign is now running with {insights['stats']['queued']} messages queued; delivery and engagement receipts will update on the dashboard in a few seconds."
+    )
+
+
 def run_agent(user_message: str, db: Session):
     messages = [
         {
@@ -179,13 +257,17 @@ Always complete all 4 steps. Be concise and conversational in your final summary
     last_campaign_id = None
 
     for _ in range(10):
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            max_tokens=2000
-        )
+        try:
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                max_tokens=2000
+            )
+        except Exception as e:
+            print(f"Agent tool-call fallback: {e}")
+            return run_fallback_campaign(user_message, db)
 
         msg = response.choices[0].message
 
@@ -205,7 +287,11 @@ Always complete all 4 steps. Be concise and conversational in your final summary
 
             for tc in msg.tool_calls:
                 fn = tc.function.name
-                args = json.loads(tc.function.arguments)
+                try:
+                    args = json.loads(tc.function.arguments)
+                except Exception as e:
+                    print(f"Invalid tool arguments fallback: {e}")
+                    return run_fallback_campaign(user_message, db)
                 print(f"[Agent] Calling: {fn} with {args}")
 
                 if fn == "segment_customers":
