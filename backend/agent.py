@@ -123,7 +123,7 @@ def execute_campaign(db: Session, campaign_name: str, customer_ids: list, messag
             message=msg,
             channel="whatsapp",
             status="queued",
-            sent_at=datetime.utcnow()
+            sent_at=None
         )
         db.add(log)
         db.flush()
@@ -146,8 +146,18 @@ def get_campaign_insights(db: Session, campaign_id: int):
     logs = db.query(CampaignLog).filter(CampaignLog.campaign_id == campaign_id).all()
     stats = {"queued": 0, "sent": 0, "delivered": 0, "opened": 0, "clicked": 0, "failed": 0}
     for log in logs:
-        if log.status in stats:
-            stats[log.status] += 1
+        if log.status == "queued":
+            stats["queued"] += 1
+        if log.sent_at:
+            stats["sent"] += 1
+        if log.status == "failed":
+            stats["failed"] += 1
+        if log.delivered_at:
+            stats["delivered"] += 1
+        if log.opened_at:
+            stats["opened"] += 1
+        if log.clicked_at:
+            stats["clicked"] += 1
     return {"campaign_id": campaign_id, "total": len(logs), "stats": stats}
 
 

@@ -8,6 +8,23 @@ from typing import List
 
 router = APIRouter()
 
+def summarize_logs(logs):
+    stats = {"queued": 0, "sent": 0, "delivered": 0, "opened": 0, "clicked": 0, "failed": 0}
+    for log in logs:
+        if log.status == "queued":
+            stats["queued"] += 1
+        if log.sent_at:
+            stats["sent"] += 1
+        if log.status == "failed":
+            stats["failed"] += 1
+        if log.delivered_at:
+            stats["delivered"] += 1
+        if log.opened_at:
+            stats["opened"] += 1
+        if log.clicked_at:
+            stats["clicked"] += 1
+    return stats
+
 @router.post("/chat")
 def chat(request: AgentRequest, db: Session = Depends(get_db)):
     response = run_agent(request.message, db)
@@ -19,10 +36,6 @@ def get_campaigns(db: Session = Depends(get_db)):
     result = []
     for c in campaigns:
         logs = db.query(CampaignLog).filter(CampaignLog.campaign_id == c.id).all()
-        stats = {"queued": 0, "sent": 0, "delivered": 0, "opened": 0, "clicked": 0, "failed": 0}
-        for log in logs:
-            if log.status in stats:
-                stats[log.status] += 1
         result.append({
             "id": c.id,
             "name": c.name,
@@ -30,7 +43,7 @@ def get_campaigns(db: Session = Depends(get_db)):
             "status": c.status,
             "created_at": c.created_at,
             "total_messages": len(logs),
-            "stats": stats
+            "stats": summarize_logs(logs)
         })
     return result
 
