@@ -11,11 +11,29 @@ export default function Dashboard({ refreshKey }) {
   const [selected, setSelected] = useState(null)
 
   useEffect(() => {
-    axios.get(`${API}/customers/stats`).then(r => setStats(r.data))
-    axios.get(`${API}/campaigns/`).then(r => {
-      setCampaigns(r.data)
-      if (r.data.length > 0) setSelected(r.data[0])
-    })
+    let active = true
+
+    const loadDashboard = () => {
+      axios.get(`${API}/customers/stats`).then(r => {
+        if (active) setStats(r.data)
+      })
+
+      axios.get(`${API}/campaigns/`).then(r => {
+        if (!active) return
+        setCampaigns(r.data)
+        setSelected(current => {
+          if (r.data.length === 0) return null
+          return r.data.find(c => c.id === current?.id) || r.data[0]
+        })
+      })
+    }
+
+    loadDashboard()
+    const interval = setInterval(loadDashboard, 3000)
+    return () => {
+      active = false
+      clearInterval(interval)
+    }
   }, [refreshKey])
 
   const statCards = stats ? [
