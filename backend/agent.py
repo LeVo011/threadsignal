@@ -36,7 +36,13 @@ tools = [
                 "type": "object",
                 "properties": {
                     "campaign_goal": {"type": "string", "description": "Campaign objective"},
-                    "customer_ids": {"type": "array", "items": {"type": "integer"}, "description": "List of customer IDs"}
+                    "customer_ids": {
+                        "anyOf": [
+                            {"type": "array", "items": {"type": "integer"}},
+                            {"type": "string"}
+                        ],
+                        "description": "List of customer IDs, or a JSON-like string such as [1, 4, 9]"
+                    }
                 },
                 "required": ["campaign_goal", "customer_ids"]
             }
@@ -51,7 +57,12 @@ tools = [
                 "type": "object",
                 "properties": {
                     "campaign_name": {"type": "string"},
-                    "customer_ids": {"type": "array", "items": {"type": "integer"}},
+                    "customer_ids": {
+                        "anyOf": [
+                            {"type": "array", "items": {"type": "integer"}},
+                            {"type": "string"}
+                        ]
+                    },
                     "messages": {"type": "object", "description": "Dict of customer_id (string) to message (string)"}
                 },
                 "required": ["campaign_name", "customer_ids", "messages"]
@@ -84,6 +95,16 @@ def segment_customers(db: Session, min_spent=None, max_spent=None, inactive_days
         query = query.filter(Customer.last_order_date <= cutoff)
     customers = query.all()
     return [{"id": c.id, "name": c.name, "email": c.email, "city": c.city, "total_spent": c.total_spent} for c in customers]
+
+
+def normalize_customer_ids(raw_ids):
+    if raw_ids is None:
+        return []
+    if isinstance(raw_ids, list):
+        return [int(x) for x in raw_ids]
+    if isinstance(raw_ids, str):
+        return [int(x) for x in re.findall(r"\d+", raw_ids)]
+    return [int(raw_ids)]
 
 
 def fallback_message(customer: Customer, campaign_goal: str):
@@ -297,10 +318,10 @@ Always complete all 4 steps. Be concise and conversational in your final summary
                 if fn == "segment_customers":
                     result = segment_customers(db, **args)
                 elif fn == "draft_messages":
-                    customer_ids = [int(x) for x in args.get("customer_ids", [])]
+                    customer_ids = normalize_customer_ids(args.get("customer_ids", []))
                     result = draft_messages(db, args.get("campaign_goal", ""), customer_ids)
                 elif fn == "execute_campaign":
-                    customer_ids = [int(x) for x in args.get("customer_ids", [])]
+                    customer_ids = normalize_customer_ids(args.get("customer_ids", []))
                     messages_dict = {str(k): v for k, v in args.get("messages", {}).items()}
                     result = execute_campaign(db, args.get("campaign_name", "Campaign"), customer_ids, messages_dict)
                     if isinstance(result, dict) and "campaign_id" in result:
